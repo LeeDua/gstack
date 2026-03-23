@@ -315,11 +315,43 @@ B=""
 [ -n "$_ROOT" ] && [ -x "$_ROOT/.claude/skills/gstack/browse/dist/browse" ] && B="$_ROOT/.claude/skills/gstack/browse/dist/browse"
 [ -z "$B" ] && B=~/.claude/skills/gstack/browse/dist/browse
 if [ -x "$B" ]; then
+  _BROWSE_PID=${PPID:-$$}
+  _BROWSE_RAND=$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n')
+  if [ -z "${BROWSE_SESSION_NAME:-}" ]; then
+    BROWSE_SESSION_NAME="browse-${_BROWSE_PID}-${_BROWSE_RAND}"
+  fi
+  _BROWSE_SESSION_SAFE=$(printf '%s' "$BROWSE_SESSION_NAME" | tr -cd 'A-Za-z0-9._-')
+  if [ -z "$_BROWSE_SESSION_SAFE" ]; then
+    _BROWSE_SESSION_SAFE="browse-${_BROWSE_PID}-${_BROWSE_RAND}"
+  fi
+  export BROWSE_SESSION_NAME="$_BROWSE_SESSION_SAFE"
+  _BROWSE_STATE_ROOT="${BROWSE_STATE_ROOT:-${TMPDIR:-/tmp}/gstack-browse-sessions}"
+  export BROWSE_STATE_FILE="${_BROWSE_STATE_ROOT}/${BROWSE_SESSION_NAME}/browse.json"
+  mkdir -p "$(dirname "$BROWSE_STATE_FILE")"
   echo "READY: $B"
+  echo "BROWSE_SESSION_NAME: $BROWSE_SESSION_NAME"
+  echo "BROWSE_STATE_FILE: $BROWSE_STATE_FILE"
 else
   echo "NEEDS_SETUP"
 fi
 ```
+
+Run this setup block once per task. By default, it creates an isolated random session/state file for that task.
+
+To reuse auth/login across tasks, preset a fixed session name before running setup:
+```bash
+export BROWSE_SESSION_NAME=webshell-prod-lida
+```
+Use the same `BROWSE_SESSION_NAME` again to reuse the same `BROWSE_STATE_FILE`.
+
+Custom natural-language command alias (for this skill):
+- If user says:
+  `browse 按照 <session_name> 的名字创建session或访问已有session 去访问这个url: <url>`
+- Interpret it as:
+  1. `export BROWSE_SESSION_NAME=<session_name>`
+  2. Run the setup block above (to materialize `BROWSE_STATE_FILE`)
+  3. Run: `$B goto <url>`
+- If `<url>` is omitted, only create/reuse the named session and wait for next browse command.
 
 If `NEEDS_SETUP`:
 1. Tell the user: "gstack browse needs a one-time build (~10 seconds). OK to proceed?" Then STOP and wait.
@@ -617,8 +649,10 @@ Refs are invalidated on navigation — run `snapshot` again after `goto`.
 | `is <prop> <sel>` | State check (visible/hidden/enabled/disabled/checked/editable/focused) |
 | `js <expr>` | Run JavaScript expression and return result as string |
 | `network [--clear]` | Network requests |
+| `observe <sel|@ref> [--interval-ms N] [--duration-ms N] [--mode text|html|value] [--stable-ms N] [--max-chars N] [--redact on|off]` | Observe selector output in intervals and return incremental JSONL deltas |
 | `perf` | Page load timings |
 | `storage [set k v]` | Read all localStorage + sessionStorage as JSON, or set <key> <value> to write localStorage |
+| `websocket [--clear] [--tail N]` | WebSocket frames and lifecycle events |
 
 ### Visual
 | Command | Description |
@@ -652,6 +686,8 @@ Refs are invalidated on navigation — run `snapshot` again after `goto`.
 | `handoff [message]` | Open visible Chrome at current page for user takeover |
 | `restart` | Restart server |
 | `resume` | Re-snapshot after user takeover, return control to AI |
+| `session-kill <session_name>` | Kill a local browse session by name and remove its state file |
+| `sessions` | List local browse session names and state files discovered from session roots |
 | `status` | Health check |
 | `stop` | Shutdown server |
 

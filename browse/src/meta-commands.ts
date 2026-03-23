@@ -23,6 +23,116 @@ export function validateOutputPath(filePath: string): void {
   }
 }
 
+interface BrowseSessionInfo {
+  name: string;
+  stateFile: string;
+  active: boolean;
+  current: boolean;
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getSessionRootsFromEnv(): string[] {
+  const roots: string[] = [];
+
+  if (process.env.BROWSE_STATE_ROOT) {
+    roots.push(process.env.BROWSE_STATE_ROOT);
+  }
+
+  if (process.env.BROWSE_STATE_FILE) {
+    // Typical structure: <root>/<session>/browse.json
+    roots.push(path.dirname(path.dirname(process.env.BROWSE_STATE_FILE)));
+  }
+
+  const tmpRoot = process.env.TMPDIR || '/tmp';
+  roots.push(path.join(tmpRoot, 'gstack-browse-sessions'));
+
+  return [...new Set(roots.map(r => path.resolve(r)))];
+}
+
+function readSessionInfoFromStateFile(
+  stateFile: string,
+  currentStateFile: string | undefined
+): BrowseSessionInfo {
+  const name = path.basename(path.dirname(stateFile));
+  let active = false;
+
+  try {
+    const raw = fs.readFileSync(stateFile, 'utf-8');
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    if (typeof parsed.pid === 'number') {
+      active = isProcessAlive(parsed.pid);
+    }
+  } catch {
+    // Invalid/missing state JSON still yields a discoverable session.
+  }
+
+  const current = Boolean(
+    currentStateFile && path.resolve(stateFile) === path.resolve(currentStateFile)
+  );
+
+  return { name, stateFile, active, current };
+}
+
+function listBrowseSessions(): string {
+  const roots = getSessionRootsFromEnv();
+  const currentStateFile = process.env.BROWSE_STATE_FILE;
+  const sessionsByStateFile = new Map<string, BrowseSessionInfo>();
+
+  for (const root of roots) {
+    let dirents: fs.Dirent[] = [];
+    try {
+      dirents = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const dirent of dirents) {
+      if (!dirent.isDirectory()) continue;
+      const stateFile = path.join(root, dirent.name, 'browse.json');
+      if (!fs.existsSync(stateFile)) continue;
+
+      const key = path.resolve(stateFile);
+      if (sessionsByStateFile.has(key)) continue;
+      sessionsByStateFile.set(key, readSessionInfoFromStateFile(stateFile, currentStateFile));
+    }
+  }
+
+  if (
+    currentStateFile &&
+    fs.existsSync(currentStateFile) &&
+    !sessionsByStateFile.has(path.resolve(currentStateFile))
+  ) {
+    sessionsByStateFile.set(
+      path.resolve(currentStateFile),
+      readSessionInfoFromStateFile(currentStateFile, currentStateFile)
+    );
+  }
+
+  const sessions = [...sessionsByStateFile.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+  if (sessions.length === 0) {
+    return [
+      'No browse sessions found.',
+      'Searched roots:',
+      ...roots.map(root => `- ${root}`),
+    ].join('\n');
+  }
+
+  return [
+    `Sessions (${sessions.length}):`,
+    ...sessions.map(s => `${s.current ? '→' : ' '} ${s.name} [${s.active ? 'active' : 'inactive'}] — ${s.stateFile}`),
+  ].join('\n');
+}
+
 export async function handleMetaCommand(
   command: string,
   args: string[],
@@ -67,6 +177,10 @@ export async function handleMetaCommand(
         `Tabs: ${tabs}`,
         `PID: ${process.pid}`,
       ].join('\n');
+    }
+
+    case 'sessions': {
+      return listBrowseSessions();
     }
 
     case 'url': {

@@ -13,8 +13,9 @@
 export const READ_COMMANDS = new Set([
   'text', 'html', 'links', 'forms', 'accessibility',
   'js', 'eval', 'css', 'attrs',
-  'console', 'network', 'cookies', 'storage', 'perf',
+  'console', 'network', 'websocket', 'cookies', 'storage', 'perf',
   'dialog', 'is',
+  'observe',
 ]);
 
 export const WRITE_COMMANDS = new Set([
@@ -26,7 +27,7 @@ export const WRITE_COMMANDS = new Set([
 
 export const META_COMMANDS = new Set([
   'tabs', 'tab', 'newtab', 'closetab',
-  'status', 'stop', 'restart',
+  'status', 'sessions', 'session-kill', 'stop', 'restart',
   'screenshot', 'pdf', 'responsive',
   'chain', 'diff',
   'url', 'snapshot',
@@ -56,10 +57,12 @@ export const COMMAND_DESCRIPTIONS: Record<string, { category: string; descriptio
   'is':      { category: 'Inspection', description: 'State check (visible/hidden/enabled/disabled/checked/editable/focused)', usage: 'is <prop> <sel>' },
   'console': { category: 'Inspection', description: 'Console messages (--errors filters to error/warning)', usage: 'console [--clear|--errors]' },
   'network': { category: 'Inspection', description: 'Network requests', usage: 'network [--clear]' },
+  'websocket': { category: 'Inspection', description: 'WebSocket frames and lifecycle events', usage: 'websocket [--clear] [--tail N]' },
   'dialog':  { category: 'Inspection', description: 'Dialog messages', usage: 'dialog [--clear]' },
   'cookies': { category: 'Inspection', description: 'All cookies as JSON' },
   'storage': { category: 'Inspection', description: 'Read all localStorage + sessionStorage as JSON, or set <key> <value> to write localStorage', usage: 'storage [set k v]' },
   'perf':    { category: 'Inspection', description: 'Page load timings' },
+  'observe': { category: 'Inspection', description: 'Observe selector output in intervals and return incremental JSONL deltas', usage: 'observe <sel|@ref> [--interval-ms N] [--duration-ms N] [--mode text|html|value] [--stable-ms N] [--max-chars N] [--redact on|off]' },
   // Interaction
   'click':   { category: 'Interaction', description: 'Click element', usage: 'click <sel>' },
   'fill':    { category: 'Interaction', description: 'Fill input', usage: 'fill <sel> <val>' },
@@ -90,6 +93,8 @@ export const COMMAND_DESCRIPTIONS: Record<string, { category: string; descriptio
   'closetab':{ category: 'Tabs', description: 'Close tab', usage: 'closetab [id]' },
   // Server
   'status':  { category: 'Server', description: 'Health check' },
+  'sessions': { category: 'Server', description: 'List local browse session names and state files discovered from session roots' },
+  'session-kill': { category: 'Server', description: 'Kill a local browse session by name and remove its state file', usage: 'session-kill <session_name>' },
   'stop':    { category: 'Server', description: 'Shutdown server' },
   'restart': { category: 'Server', description: 'Restart server' },
   // Meta

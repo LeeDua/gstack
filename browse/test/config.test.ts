@@ -36,6 +36,7 @@ describe('config', () => {
       expect(config.consoleLog).toBe(path.join(config.stateDir, 'browse-console.log'));
       expect(config.networkLog).toBe(path.join(config.stateDir, 'browse-network.log'));
       expect(config.dialogLog).toBe(path.join(config.stateDir, 'browse-dialog.log'));
+      expect(config.websocketLog).toBe(path.join(config.stateDir, 'browse-websocket.log'));
     });
   });
 

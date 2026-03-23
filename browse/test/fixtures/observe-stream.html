@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Observe Stream</title>
+  <style>
+    body { font-family: monospace; margin: 20px; }
+    #terminal {
+      border: 1px solid #ccc;
+      padding: 10px;
+      min-height: 160px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>Observe Stream Fixture</h1>
+  <div id="terminal"></div>
+
+  <script>
+    const terminal = document.getElementById('terminal');
+    const lines = [
+      'connecting...',
+      'Authorization: Bearer sk_test_abcdefghijklmnopqrstuvwxyz',
+      'ready',
+    ];
+    let index = 0;
+    const timer = setInterval(() => {
+      if (index >= lines.length) {
+        clearInterval(timer);
+        return;
+      }
+      const prefix = terminal.textContent.length > 0 ? '\n' : '';
+      terminal.textContent += prefix + lines[index++];
+    }, 120);
+  </script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WebSocket Fixture</title>
+</head>
+<body>
+  <h1>WebSocket Fixture</h1>
+  <p id="status">connecting</p>
+  <pre id="messages"></pre>
+
+  <script>
+    const status = document.getElementById('status');
+    const messages = document.getElementById('messages');
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+    ws.addEventListener('open', () => {
+      status.textContent = 'open';
+      ws.send('ping-one');
+      setTimeout(() => ws.send('token=sk_test_TEST_TOKEN_12345'), 40);
+    });
+
+    ws.addEventListener('message', (event) => {
+      messages.textContent += (messages.textContent ? '\n' : '') + event.data;
+      if (event.data.includes('echo:token=')) {
+        ws.close();
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      status.textContent = 'closed';
+    });
+  </script>
+</body>
+</html>

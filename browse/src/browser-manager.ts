@@ -16,7 +16,7 @@
  */
 
 import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Locator, type Cookie } from 'playwright';
-import { addConsoleEntry, addNetworkEntry, addDialogEntry, networkBuffer, type DialogEntry } from './buffers';
+import { addConsoleEntry, addNetworkEntry, addDialogEntry, addWebSocketEntry, networkBuffer, type DialogEntry } from './buffers';
 import { validateNavigationUrl } from './url-validation';
 
 export interface RefEntry {
@@ -588,6 +588,58 @@ export class BrowserManager {
         timestamp: Date.now(),
         level: msg.type(),
         text: msg.text(),
+      });
+    });
+
+    page.on('websocket', (ws) => {
+      const wsUrl = ws.url();
+      addWebSocketEntry({
+        timestamp: Date.now(),
+        url: wsUrl,
+        direction: 'open',
+      });
+
+      ws.on('framesent', (event: { payload: unknown }) => {
+        const payload = typeof event.payload === 'string'
+          ? event.payload
+          : String(event.payload ?? '');
+        addWebSocketEntry({
+          timestamp: Date.now(),
+          url: wsUrl,
+          direction: 'out',
+          payload: payload.slice(0, 4000),
+          payloadBytes: payload.length,
+        });
+      });
+
+      ws.on('framereceived', (event: { payload: unknown }) => {
+        const payload = typeof event.payload === 'string'
+          ? event.payload
+          : String(event.payload ?? '');
+        addWebSocketEntry({
+          timestamp: Date.now(),
+          url: wsUrl,
+          direction: 'in',
+          payload: payload.slice(0, 4000),
+          payloadBytes: payload.length,
+        });
+      });
+
+      ws.on('close', () => {
+        addWebSocketEntry({
+          timestamp: Date.now(),
+          url: wsUrl,
+          direction: 'close',
+        });
+      });
+
+      ws.on('socketerror', (error: unknown) => {
+        addWebSocketEntry({
+          timestamp: Date.now(),
+          url: wsUrl,
+          direction: 'error',
+          error: error instanceof Error ? error.message : String(error ?? 'Unknown WebSocket error'),
+        });
       });
     });
 

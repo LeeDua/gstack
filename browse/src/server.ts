@@ -9,7 +9,7 @@
  *
  * State:
  *   State file: <project-root>/.gstack/browse.json (set via BROWSE_STATE_FILE env)
- *   Log files:  <project-root>/.gstack/browse-{console,network,dialog}.log
+ *   Log files:  <project-root>/.gstack/browse-{console,network,dialog,websocket}.log
  *   Port:       random 10000-60000 (or BROWSE_PORT env for debug override)
  */
 
@@ -81,15 +81,17 @@ function generateHelpText(): string {
 }
 
 // ─── Buffer (from buffers.ts) ────────────────────────────────────
-import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry } from './buffers';
-export { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry };
+import { consoleBuffer, networkBuffer, dialogBuffer, websocketBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, addWebSocketEntry, type LogEntry, type NetworkEntry, type DialogEntry, type WebSocketEntry } from './buffers';
+export { consoleBuffer, networkBuffer, dialogBuffer, websocketBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, addWebSocketEntry, type LogEntry, type NetworkEntry, type DialogEntry, type WebSocketEntry };
 
 const CONSOLE_LOG_PATH = config.consoleLog;
 const NETWORK_LOG_PATH = config.networkLog;
 const DIALOG_LOG_PATH = config.dialogLog;
+const WEBSOCKET_LOG_PATH = config.websocketLog;
 let lastConsoleFlushed = 0;
 let lastNetworkFlushed = 0;
 let lastDialogFlushed = 0;
+let lastWebSocketFlushed = 0;
 let flushInProgress = false;
 
 async function flushBuffers() {
@@ -128,6 +130,19 @@ async function flushBuffers() {
       ).join('\n') + '\n';
       fs.appendFileSync(DIALOG_LOG_PATH, lines);
       lastDialogFlushed = dialogBuffer.totalAdded;
+    }
+
+    // WebSocket buffer
+    const newWebSocketCount = websocketBuffer.totalAdded - lastWebSocketFlushed;
+    if (newWebSocketCount > 0) {
+      const entries = websocketBuffer.last(Math.min(newWebSocketCount, websocketBuffer.length));
+      const lines = entries.map(e =>
+        `[${new Date(e.timestamp).toISOString()}] [${e.direction}] ${e.url}` +
+        `${e.payload ? ` "${e.payload}"` : ''}` +
+        `${e.error ? ` ERROR: ${e.error}` : ''}`
+      ).join('\n') + '\n';
+      fs.appendFileSync(WEBSOCKET_LOG_PATH, lines);
+      lastWebSocketFlushed = websocketBuffer.totalAdded;
     }
   } catch {
     // Flush failures are non-fatal — buffers are in memory
@@ -293,6 +308,7 @@ async function start() {
   try { fs.unlinkSync(CONSOLE_LOG_PATH); } catch {}
   try { fs.unlinkSync(NETWORK_LOG_PATH); } catch {}
   try { fs.unlinkSync(DIALOG_LOG_PATH); } catch {}
+  try { fs.unlinkSync(WEBSOCKET_LOG_PATH); } catch {}
 
   const port = await findPort();
 

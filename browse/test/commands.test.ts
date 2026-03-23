@@ -12,7 +12,7 @@ import { resolveServerScript } from '../src/cli';
 import { handleReadCommand } from '../src/read-commands';
 import { handleWriteCommand } from '../src/write-commands';
 import { handleMetaCommand } from '../src/meta-commands';
-import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, CircularBuffer } from '../src/buffers';
+import { consoleBuffer, networkBuffer, dialogBuffer, websocketBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, addWebSocketEntry, CircularBuffer } from '../src/buffers';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
 import * as path from 'path';
@@ -373,6 +373,59 @@ describe('SPA and buffers', () => {
     const result = await handleReadCommand('network', ['--clear'], bm);
     expect(result).toContain('cleared');
   });
+
+  test('websocket captures open/frame/close events and redacts by default', async () => {
+    await handleReadCommand('websocket', ['--clear'], bm);
+    await handleWriteCommand('goto', [baseUrl + '/websocket.html'], bm);
+    await Bun.sleep(700);
+
+    const result = await handleReadCommand('websocket', ['--tail', '20'], bm);
+    expect(result).toContain('[open]');
+    expect(result).toContain('[out]');
+    expect(result).toContain('[in]');
+    expect(result).toContain('echo:ping-one');
+    expect(result).toContain('token=[REDACTED]');
+    expect(result).not.toContain('TEST_TOKEN_12345');
+  });
+
+  test('websocket --clear clears buffer', async () => {
+    const result = await handleReadCommand('websocket', ['--clear'], bm);
+    expect(result).toContain('cleared');
+    const after = await handleReadCommand('websocket', [], bm);
+    expect(after).toContain('no websocket activity');
+  });
+
+  test('observe returns JSONL deltas with done event', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/observe-stream.html'], bm);
+    const output = await handleReadCommand('observe', [
+      '#terminal',
+      '--interval-ms', '80',
+      '--duration-ms', '1800',
+      '--stable-ms', '300',
+      '--max-chars', '2000',
+    ], bm);
+
+    const lines = output.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const deltaEvents = lines.filter((event) => event.type === 'delta');
+    const doneEvents = lines.filter((event) => event.type === 'done');
+
+    expect(deltaEvents.length).toBeGreaterThan(0);
+    expect(doneEvents.length).toBe(1);
+    expect(output).toContain('[REDACTED]');
+    expect(output).not.toContain('sk_test_abcdefghijklmnopqrstuvwxyz');
+  });
+
+  test('observe supports --redact off', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/observe-stream.html'], bm);
+    const output = await handleReadCommand('observe', [
+      '#terminal',
+      '--interval-ms', '80',
+      '--duration-ms', '1000',
+      '--stable-ms', '250',
+      '--redact', 'off',
+    ], bm);
+    expect(output).toContain('sk_test_abcdefghijklmnopqrstuvwxyz');
+  });
 });
 
 // ─── Cookies / Storage ──────────────────────────────────────────
@@ -659,6 +712,39 @@ describe('Status', () => {
   });
 });
 
+// ─── Sessions ──────────────────────────────────────────────────
+
+describe('Sessions', () => {
+  test('sessions lists discovered session names', async () => {
+    const root = `/tmp/browse-sessions-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const pilotState = path.join(root, 'pilot_man', 'browse.json');
+    const qaState = path.join(root, 'qa_job_42', 'browse.json');
+    fs.mkdirSync(path.dirname(pilotState), { recursive: true });
+    fs.mkdirSync(path.dirname(qaState), { recursive: true });
+    fs.writeFileSync(pilotState, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    fs.writeFileSync(qaState, JSON.stringify({ pid: 999999999, startedAt: new Date().toISOString() }));
+
+    const oldRoot = process.env.BROWSE_STATE_ROOT;
+    const oldStateFile = process.env.BROWSE_STATE_FILE;
+    process.env.BROWSE_STATE_ROOT = root;
+    process.env.BROWSE_STATE_FILE = pilotState;
+
+    try {
+      const result = await handleMetaCommand('sessions', [], bm, async () => {});
+      expect(result).toContain('Sessions (2):');
+      expect(result).toContain('pilot_man');
+      expect(result).toContain('qa_job_42');
+      expect(result).toContain('→ pilot_man');
+    } finally {
+      if (oldRoot === undefined) delete process.env.BROWSE_STATE_ROOT;
+      else process.env.BROWSE_STATE_ROOT = oldRoot;
+      if (oldStateFile === undefined) delete process.env.BROWSE_STATE_FILE;
+      else process.env.BROWSE_STATE_FILE = oldStateFile;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── CLI server script resolution ───────────────────────────────
 
 describe('CLI server script resolution', () => {
@@ -725,6 +811,47 @@ describe('CLI lifecycle', () => {
     expect(result.stdout).toContain('Status: healthy');
     expect(result.stderr).toContain('Starting server');
   }, 20000);
+
+  test('session-kill stops named session and removes state file', async () => {
+    const root = `/tmp/browse-kill-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sessionName = 'pilot_man';
+    const stateFile = path.join(root, sessionName, 'browse.json');
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+
+    const sleeper = spawn('sleep', ['60']);
+    fs.writeFileSync(stateFile, JSON.stringify({
+      pid: sleeper.pid,
+      startedAt: new Date().toISOString(),
+    }));
+
+    const cliPath = path.resolve(__dirname, '../src/cli.ts');
+    const cliEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined) cliEnv[k] = v;
+    }
+    cliEnv.BROWSE_STATE_ROOT = root;
+
+    const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      const proc = spawn('bun', ['run', cliPath, 'session-kill', sessionName], { env: cliEnv });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d) => stdout += d.toString());
+      proc.stderr.on('data', (d) => stderr += d.toString());
+      proc.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    });
+
+    try {
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`Session "${sessionName}"`);
+      expect(fs.existsSync(stateFile)).toBe(false);
+      let alive = true;
+      try { process.kill(sleeper.pid!, 0); } catch { alive = false; }
+      expect(alive).toBe(false);
+    } catch (err) {
+      try { process.kill(sleeper.pid!, 'SIGKILL'); } catch {}
+      throw err;
+    }
+  }, 20000);
 });
 
 // ─── Buffer bounds ──────────────────────────────────────────────
@@ -754,17 +881,33 @@ describe('Buffer bounds', () => {
     networkBuffer.clear();
   });
 
+  test('websocket buffer caps at 50000 entries', () => {
+    websocketBuffer.clear();
+    for (let i = 0; i < 50_010; i++) {
+      addWebSocketEntry({ timestamp: i, direction: 'in', url: 'ws://x', payload: `frame-${i}` });
+    }
+    expect(websocketBuffer.length).toBe(50_000);
+    const entries = websocketBuffer.toArray();
+    expect(entries[0].payload).toBe('frame-10');
+    expect(entries[entries.length - 1].payload).toBe('frame-50009');
+    websocketBuffer.clear();
+  });
+
   test('totalAdded counters keep incrementing past buffer cap', () => {
     const startConsole = consoleBuffer.totalAdded;
     const startNetwork = networkBuffer.totalAdded;
+    const startWebsocket = websocketBuffer.totalAdded;
     for (let i = 0; i < 100; i++) {
       addConsoleEntry({ timestamp: i, level: 'log', text: `t-${i}` });
       addNetworkEntry({ timestamp: i, method: 'GET', url: `http://t/${i}` });
+      addWebSocketEntry({ timestamp: i, direction: 'out', url: 'ws://t', payload: `ws-${i}` });
     }
     expect(consoleBuffer.totalAdded).toBe(startConsole + 100);
     expect(networkBuffer.totalAdded).toBe(startNetwork + 100);
+    expect(websocketBuffer.totalAdded).toBe(startWebsocket + 100);
     consoleBuffer.clear();
     networkBuffer.clear();
+    websocketBuffer.clear();
   });
 });
 

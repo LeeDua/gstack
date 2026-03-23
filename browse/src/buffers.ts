@@ -114,6 +114,15 @@ export interface DialogEntry {
   response?: string;   // text provided for prompt
 }
 
+export interface WebSocketEntry {
+  timestamp: number;
+  url: string;
+  direction: 'open' | 'close' | 'in' | 'out' | 'error';
+  payload?: string;
+  payloadBytes?: number;
+  error?: string;
+}
+
 // ─── Buffer Instances ───────────────────────────────────────
 
 const HIGH_WATER_MARK = 50_000;
@@ -121,6 +130,7 @@ const HIGH_WATER_MARK = 50_000;
 export const consoleBuffer = new CircularBuffer<LogEntry>(HIGH_WATER_MARK);
 export const networkBuffer = new CircularBuffer<NetworkEntry>(HIGH_WATER_MARK);
 export const dialogBuffer = new CircularBuffer<DialogEntry>(HIGH_WATER_MARK);
+export const websocketBuffer = new CircularBuffer<WebSocketEntry>(HIGH_WATER_MARK);
 
 // ─── Convenience add functions ──────────────────────────────
 
@@ -134,4 +144,8 @@ export function addNetworkEntry(entry: NetworkEntry) {
 
 export function addDialogEntry(entry: DialogEntry) {
   dialogBuffer.push(entry);
+}
+
+export function addWebSocketEntry(entry: WebSocketEntry) {
+  websocketBuffer.push(entry);
 }

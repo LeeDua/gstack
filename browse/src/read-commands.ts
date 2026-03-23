@@ -2,15 +2,16 @@
  * Read commands — extract data from pages without side effects
  *
  * text, html, links, forms, accessibility, js, eval, css, attrs,
- * console, network, cookies, storage, perf
+ * console, network, websocket, observe, cookies, storage, perf
  */
 
 import type { BrowserManager } from './browser-manager';
-import { consoleBuffer, networkBuffer, dialogBuffer } from './buffers';
-import type { Page } from 'playwright';
+import { consoleBuffer, networkBuffer, dialogBuffer, websocketBuffer } from './buffers';
+import type { Locator, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TEMP_DIR, isPathWithin } from './platform';
+import { redactOutput, truncateTail } from './redaction';
 
 /** Detect await keyword, ignoring comments. Accepted risk: await in string literals triggers wrapping (harmless). */
 function hasAwait(code: string): boolean {
@@ -70,6 +71,148 @@ export async function getCleanText(page: Page): Promise<string> {
       .join('\n');
   });
 }
+
+interface ObserveOptions {
+  intervalMs: number;
+  durationMs: number;
+  mode: 'text' | 'html' | 'value';
+  stableMs: number;
+  maxChars: number;
+  redact: boolean;
+}
+
+function extractRedactFlag(rawArgs: string[]): { args: string[]; redact: boolean } {
+  const args = [...rawArgs];
+  const idx = args.indexOf('--redact');
+  if (idx === -1) return { args, redact: true };
+
+  const value = args[idx + 1];
+  if (value !== 'on' && value !== 'off') {
+    throw new Error('Usage: --redact <on|off>');
+  }
+  args.splice(idx, 2);
+  return { args, redact: value === 'on' };
+}
+
+function parseObserveArgs(args: string[]): { target: string; options: ObserveOptions } {
+  const { args: normalizedArgs, redact } = extractRedactFlag(args);
+  const target = normalizedArgs[0];
+  if (!target || target.startsWith('--')) {
+    throw new Error(
+      'Usage: browse observe <sel|@ref> [--interval-ms N] [--duration-ms N] [--mode text|html|value] [--stable-ms N] [--max-chars N] [--redact on|off]'
+    );
+  }
+
+  const options: ObserveOptions = {
+    intervalMs: 500,
+    durationMs: 15000,
+    mode: 'text',
+    stableMs: 1200,
+    maxChars: 20000,
+    redact,
+  };
+
+  for (let i = 1; i < normalizedArgs.length; i++) {
+    const flag = normalizedArgs[i];
+    const value = normalizedArgs[i + 1];
+    if (!flag.startsWith('--')) throw new Error(`Unknown observe argument: ${flag}`);
+
+    switch (flag) {
+      case '--interval-ms':
+        options.intervalMs = parseInt(value, 10);
+        if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+          throw new Error('--interval-ms must be a positive integer');
+        }
+        i++;
+        break;
+      case '--duration-ms':
+        options.durationMs = parseInt(value, 10);
+        if (!Number.isFinite(options.durationMs) || options.durationMs <= 0) {
+          throw new Error('--duration-ms must be a positive integer');
+        }
+        i++;
+        break;
+      case '--mode':
+        if (value !== 'text' && value !== 'html' && value !== 'value') {
+          throw new Error('--mode must be one of: text, html, value');
+        }
+        options.mode = value;
+        i++;
+        break;
+      case '--stable-ms':
+        options.stableMs = parseInt(value, 10);
+        if (!Number.isFinite(options.stableMs) || options.stableMs <= 0) {
+          throw new Error('--stable-ms must be a positive integer');
+        }
+        i++;
+        break;
+      case '--max-chars':
+        options.maxChars = parseInt(value, 10);
+        if (!Number.isFinite(options.maxChars) || options.maxChars <= 0) {
+          throw new Error('--max-chars must be a positive integer');
+        }
+        i++;
+        break;
+      default:
+        throw new Error(`Unknown observe flag: ${flag}`);
+    }
+  }
+
+  return { target, options };
+}
+
+function computeDelta(previous: string, current: string): string {
+  if (current === previous) return '';
+  if (!previous) return current;
+  if (!current) return '[cleared output]';
+  if (current.startsWith(previous)) return current.slice(previous.length);
+
+  let prefix = 0;
+  while (
+    prefix < previous.length &&
+    prefix < current.length &&
+    previous[prefix] === current[prefix]
+  ) {
+    prefix++;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < (previous.length - prefix) &&
+    suffix < (current.length - prefix) &&
+    previous[previous.length - 1 - suffix] === current[current.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+
+  const removed = previous.slice(prefix, previous.length - suffix);
+  const added = current.slice(prefix, current.length - suffix);
+
+  if (!removed) return added;
+  if (!added) return `[deleted ${removed.length} chars]`;
+  return `[replaced ${removed.length} chars]\n${added}`;
+}
+
+async function readObservedContent(target: string, mode: ObserveOptions['mode'], bm: BrowserManager): Promise<string> {
+  const page = bm.getPage();
+  const resolved = await bm.resolveRef(target);
+  const locator: Locator = 'locator' in resolved ? resolved.locator : page.locator(resolved.selector);
+
+  switch (mode) {
+    case 'html':
+      return await locator.innerHTML({ timeout: 5000 });
+    case 'value':
+      return await locator.evaluate((el) => {
+        const candidate = el as HTMLInputElement | HTMLTextAreaElement;
+        if (typeof candidate.value === 'string') return candidate.value;
+        return (el as HTMLElement).innerText || el.textContent || '';
+      });
+    case 'text':
+    default:
+      return await locator.evaluate((el) => (el as HTMLElement).innerText || el.textContent || '');
+  }
+}
+
 
 export async function handleReadCommand(
   command: string,
@@ -208,28 +351,63 @@ export async function handleReadCommand(
     }
 
     case 'console': {
-      if (args[0] === '--clear') {
+      const { args: cmdArgs, redact } = extractRedactFlag(args);
+      if (cmdArgs[0] === '--clear') {
         consoleBuffer.clear();
         return 'Console buffer cleared.';
       }
-      const entries = args[0] === '--errors'
+      const entries = cmdArgs[0] === '--errors'
         ? consoleBuffer.toArray().filter(e => e.level === 'error' || e.level === 'warning')
         : consoleBuffer.toArray();
-      if (entries.length === 0) return args[0] === '--errors' ? '(no console errors)' : '(no console messages)';
-      return entries.map(e =>
+      if (entries.length === 0) return cmdArgs[0] === '--errors' ? '(no console errors)' : '(no console messages)';
+      const text = entries.map(e =>
         `[${new Date(e.timestamp).toISOString()}] [${e.level}] ${e.text}`
       ).join('\n');
+      return redactOutput(text, redact);
     }
 
     case 'network': {
-      if (args[0] === '--clear') {
+      const { args: cmdArgs, redact } = extractRedactFlag(args);
+      if (cmdArgs[0] === '--clear') {
         networkBuffer.clear();
         return 'Network buffer cleared.';
       }
       if (networkBuffer.length === 0) return '(no network requests)';
-      return networkBuffer.toArray().map(e =>
+      const text = networkBuffer.toArray().map(e =>
         `${e.method} ${e.url} → ${e.status || 'pending'} (${e.duration || '?'}ms, ${e.size || '?'}B)`
       ).join('\n');
+      return redactOutput(text, redact);
+    }
+
+    case 'websocket': {
+      const { args: cmdArgs, redact } = extractRedactFlag(args);
+      if (cmdArgs[0] === '--clear') {
+        websocketBuffer.clear();
+        return 'WebSocket buffer cleared.';
+      }
+
+      let tail = 0;
+      const tailIdx = cmdArgs.indexOf('--tail');
+      if (tailIdx !== -1) {
+        const rawTail = cmdArgs[tailIdx + 1];
+        tail = parseInt(rawTail, 10);
+        if (!Number.isFinite(tail) || tail <= 0) {
+          throw new Error('Usage: websocket [--clear] [--tail N]');
+        }
+      }
+
+      const entries = websocketBuffer.toArray();
+      if (entries.length === 0) return '(no websocket activity)';
+      const selected = tail > 0 ? entries.slice(-tail) : entries;
+
+      const text = selected.map((entry) => {
+        const timestamp = new Date(entry.timestamp).toISOString();
+        const bytes = entry.payloadBytes ? ` (${entry.payloadBytes}B)` : '';
+        const payload = entry.payload ? ` ${entry.payload}` : '';
+        const error = entry.error ? ` ERROR: ${entry.error}` : '';
+        return `[${timestamp}] [${entry.direction}] ${entry.url}${bytes}${payload}${error}`;
+      }).join('\n');
+      return redactOutput(text, redact);
     }
 
     case 'dialog': {
@@ -272,6 +450,58 @@ export async function handleReadCommand(
         default:
           throw new Error(`Unknown property: ${property}. Use: visible, hidden, enabled, disabled, checked, editable, focused`);
       }
+    }
+
+    case 'observe': {
+      const { target, options } = parseObserveArgs(args);
+      const startedAt = Date.now();
+      let lastChangeAt = startedAt;
+      let previous = '';
+      const lines: string[] = [];
+      let completedReason: 'stable' | 'timeout' = 'timeout';
+
+      while (Date.now() - startedAt < options.durationMs) {
+        const now = Date.now();
+        const content = truncateTail(
+          await readObservedContent(target, options.mode, bm),
+          options.maxChars
+        );
+        const delta = computeDelta(previous, content);
+
+        if (delta) {
+          lines.push(JSON.stringify({
+            type: 'delta',
+            ts: new Date(now).toISOString(),
+            full_len: content.length,
+            delta: redactOutput(delta, options.redact),
+          }));
+          previous = content;
+          lastChangeAt = now;
+        } else {
+          lines.push(JSON.stringify({
+            type: 'heartbeat',
+            ts: new Date(now).toISOString(),
+            full_len: content.length,
+          }));
+        }
+
+        if (now - lastChangeAt >= options.stableMs) {
+          completedReason = 'stable';
+          break;
+        }
+
+        await Bun.sleep(options.intervalMs);
+      }
+
+      lines.push(JSON.stringify({
+        type: 'done',
+        ts: new Date().toISOString(),
+        reason: completedReason,
+        full_len: previous.length,
+        sample: redactOutput(truncateTail(previous, 1000), options.redact),
+      }));
+
+      return lines.join('\n');
     }
 
     case 'cookies': {

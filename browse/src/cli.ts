@@ -356,6 +356,92 @@ async function sendCommand(state: ServerState, command: string, args: string[], 
   }
 }
 
+// ─── Session Utilities (CLI-local, no server required) ────────
+const SESSION_NAME_SAFE_RE = /^[A-Za-z0-9._-]+$/;
+
+function getSessionRoots(env: Record<string, string | undefined> = process.env): string[] {
+  const roots: string[] = [];
+
+  if (env.BROWSE_STATE_ROOT) {
+    roots.push(env.BROWSE_STATE_ROOT);
+  }
+
+  if (env.BROWSE_STATE_FILE) {
+    // Typical structure: <root>/<session>/browse.json
+    roots.push(path.dirname(path.dirname(env.BROWSE_STATE_FILE)));
+  }
+
+  const tmpRoot = env.TMPDIR || '/tmp';
+  roots.push(path.join(tmpRoot, 'gstack-browse-sessions'));
+
+  return [...new Set(roots.map(r => path.resolve(r)))];
+}
+
+function sanitizeSessionName(name: string): string {
+  const trimmed = name.trim();
+  const safe = trimmed.replace(/[^A-Za-z0-9._-]/g, '');
+  if (!safe) {
+    throw new Error('Invalid session name. Allowed characters: A-Z a-z 0-9 . _ -');
+  }
+  if (!SESSION_NAME_SAFE_RE.test(safe)) {
+    throw new Error('Invalid session name after sanitization.');
+  }
+  return safe;
+}
+
+function findSessionStateFile(
+  sessionName: string,
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const roots = getSessionRoots(env);
+  for (const root of roots) {
+    const candidate = path.join(root, sessionName, 'browse.json');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function killSessionByName(rawName: string): Promise<string> {
+  const sessionName = sanitizeSessionName(rawName);
+  const roots = getSessionRoots();
+  const sessionDirs = roots
+    .map(root => path.join(root, sessionName))
+    .filter(dir => fs.existsSync(dir) && fs.statSync(dir).isDirectory());
+  const stateFile = findSessionStateFile(sessionName);
+
+  if (!stateFile && sessionDirs.length === 0) {
+    return `Session "${sessionName}" not found (already stopped).`;
+  }
+
+  let wasActive = false;
+  if (stateFile) {
+    try {
+      const stateRaw = fs.readFileSync(stateFile, 'utf-8');
+      const state = JSON.parse(stateRaw) as { pid?: unknown };
+      if (typeof state.pid === 'number' && isProcessAlive(state.pid)) {
+        wasActive = true;
+        await killServer(state.pid);
+      }
+    } catch {
+      // Corrupt/missing state content: still proceed with cleanup.
+    }
+  }
+
+  if (stateFile) {
+    try { fs.unlinkSync(stateFile); } catch {}
+    try { fs.unlinkSync(`${stateFile}.lock`); } catch {}
+  }
+
+  for (const dir of sessionDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+
+  if (stateFile) {
+    return `Session "${sessionName}" ${wasActive ? 'killed' : 'cleaned'}: ${stateFile}`;
+  }
+  return `Session "${sessionName}" cleaned (no state file).`;
+}
+
 // ─── Main ──────────────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
@@ -374,9 +460,11 @@ Interaction:    click <sel> | fill <sel> <val> | select <sel> <val>
                 cookie-import <json-file>
                 cookie-import-browser [browser] [--domain <d>]
 Inspection:     js <expr> | eval <file> | css <sel> <prop> | attrs <sel>
-                console [--clear|--errors] | network [--clear] | dialog [--clear]
+                console [--clear|--errors] | network [--clear] | websocket [--clear] [--tail N] | dialog [--clear]
                 cookies | storage [set <k> <v>] | perf
                 is <prop> <sel> (visible|hidden|enabled|disabled|checked|editable|focused)
+                observe <sel|@ref> [--interval-ms N] [--duration-ms N]
+                  [--mode text|html|value] [--stable-ms N] [--max-chars N] [--redact on|off]
 Visual:         screenshot [--viewport] [--clip x,y,w,h] [@ref|sel] [path]
                 pdf [path] | responsive [prefix]
 Snapshot:       snapshot [-i] [-c] [-d N] [-s sel] [-D] [-a] [-o path] [-C]
@@ -386,7 +474,7 @@ Snapshot:       snapshot [-i] [-c] [-d N] [-s sel] [-D] [-a] [-o path] [-C]
 Compare:        diff <url1> <url2>
 Multi-step:     chain (reads JSON from stdin)
 Tabs:           tabs | tab <id> | newtab [url] | closetab [id]
-Server:         status | cookie <n>=<v> | header <n>:<v>
+Server:         status | sessions | session-kill <name> | cookie <n>=<v> | header <n>:<v>
                 useragent <str> | stop | restart
 Dialogs:        dialog-accept [text] | dialog-dismiss
 
@@ -401,6 +489,17 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
 
   const command = args[0];
   const commandArgs = args.slice(1);
+
+  // CLI-local session kill (does not require starting a browse server)
+  if (command === 'session-kill') {
+    const target = commandArgs[0];
+    if (!target) {
+      throw new Error('Usage: browse session-kill <session_name>');
+    }
+    const result = await killSessionByName(target);
+    console.log(result);
+    return;
+  }
 
   // Special case: chain reads from stdin
   if (command === 'chain' && commandArgs.length === 0) {

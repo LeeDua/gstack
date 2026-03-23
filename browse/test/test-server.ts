@@ -9,40 +9,74 @@ import * as fs from 'fs';
 const FIXTURES_DIR = path.resolve(import.meta.dir, 'fixtures');
 
 export function startTestServer(port: number = 0): { server: ReturnType<typeof Bun.serve>; url: string } {
-  const server = Bun.serve({
-    port,
-    hostname: '127.0.0.1',
-    fetch(req) {
-      const url = new URL(req.url);
+  let server: ReturnType<typeof Bun.serve> | null = null;
+  let lastError: unknown = null;
 
-      // Echo endpoint — returns request headers as JSON
-      if (url.pathname === '/echo') {
-        const headers: Record<string, string> = {};
-        req.headers.forEach((value, key) => { headers[key] = value; });
-        return new Response(JSON.stringify(headers, null, 2), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
+  const maxAttempts = port === 0 ? 20 : 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const requestedPort = port === 0
+      ? 20000 + Math.floor(Math.random() * 20000)
+      : port;
+    try {
+      server = Bun.serve({
+        port: requestedPort,
+        hostname: '127.0.0.1',
+        fetch(req) {
+          const url = new URL(req.url);
 
-      let filePath = url.pathname === '/' ? '/basic.html' : url.pathname;
+          if (url.pathname === '/ws') {
+            const upgraded = server!.upgrade(req);
+            if (upgraded) return undefined;
+            return new Response('WebSocket upgrade failed', { status: 400 });
+          }
 
-      // Remove leading slash
-      filePath = filePath.replace(/^\//, '');
-      const fullPath = path.join(FIXTURES_DIR, filePath);
+          // Echo endpoint — returns request headers as JSON
+          if (url.pathname === '/echo') {
+            const headers: Record<string, string> = {};
+            req.headers.forEach((value, key) => { headers[key] = value; });
+            return new Response(JSON.stringify(headers, null, 2), {
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
 
-      if (!fs.existsSync(fullPath)) {
-        return new Response('Not Found', { status: 404 });
-      }
+          let filePath = url.pathname === '/' ? '/basic.html' : url.pathname;
 
-      const content = fs.readFileSync(fullPath, 'utf-8');
-      const ext = path.extname(fullPath);
-      const contentType = ext === '.html' ? 'text/html' : 'text/plain';
+          // Remove leading slash
+          filePath = filePath.replace(/^\//, '');
+          const fullPath = path.join(FIXTURES_DIR, filePath);
 
-      return new Response(content, {
-        headers: { 'Content-Type': contentType },
+          if (!fs.existsSync(fullPath)) {
+            return new Response('Not Found', { status: 404 });
+          }
+
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          const ext = path.extname(fullPath);
+          const contentType = ext === '.html' ? 'text/html' : 'text/plain';
+
+          return new Response(content, {
+            headers: { 'Content-Type': contentType },
+          });
+        },
+        websocket: {
+          open(ws) {
+            ws.send('server-ready');
+          },
+          message(ws, message) {
+            const text = typeof message === 'string' ? message : Buffer.from(message).toString('utf-8');
+            ws.send(`echo:${text}`);
+          },
+        },
       });
-    },
-  });
+      break;
+    } catch (error) {
+      lastError = error;
+      if (port !== 0) throw error;
+    }
+  }
+
+  if (!server) {
+    throw lastError instanceof Error ? lastError : new Error('Failed to start test server');
+  }
 
   const url = `http://127.0.0.1:${server.port}`;
   return { server, url };
