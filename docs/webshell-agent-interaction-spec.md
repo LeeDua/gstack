@@ -32,6 +32,7 @@
 - 已知安全命令（读操作、状态查询、日志查看）
 - 同一 run 内的连续诊断步骤
 - 已存在 auth state 的自动复用（`auth-load`）
+- 用户在当前会话已明确预授权的 webshell 操作（本会话：不逐条询问）
 
 原则：若可以通过已有上下文安全决策，则不打断用户。
 
@@ -41,7 +42,8 @@
 
 1. 高风险命令
 - 命中 risk 分类 `review`（如 `rm -rf`, `mkfs`, `shutdown`, `reboot`, `DROP/TRUNCATE`, `kubectl delete`, `terraform destroy`）
-- 需要显式 `--confirm` 或用户确认后再执行
+- 默认需要显式 `--confirm` 或用户确认后再执行
+- 例外：如果用户已在会话中明确给出“webshell 操作不逐条授权”的预授权，可直接执行并在 run ledger 记录
 
 2. 不可逆/破坏性动作
 - 任何会修改远端关键状态且不可回滚的操作

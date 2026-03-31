@@ -4,7 +4,7 @@ import * as path from 'path';
 import type { BrowserManager } from './browser-manager';
 import { websocketBuffer } from './buffers';
 import { resolveConfig } from './config';
-import { readAuthStateFile } from './auth-state';
+import { readAuthStateFile, writeAuthStateFile } from './auth-state';
 import { validateNavigationUrl } from './url-validation';
 
 const RUN_ID_RE = /^[A-Za-z0-9._-]+$/;
@@ -62,6 +62,7 @@ interface ReadinessProbe {
   bodyTextLen: number;
   iframeCount: number;
   terminalHintCount: number;
+  hasSsoSignals: boolean;
 }
 
 interface CommandFocusResult {
@@ -113,9 +114,33 @@ function parsePositiveInt(raw: string, key: string): number {
 }
 
 function looksLikeWebshellUrl(url: string): boolean {
-  const value = (url || '').toLowerCase();
-  if (!value) return false;
-  return value.includes('webshell') || value.includes('/common/v2') || value.includes('security-webshell');
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    if (host.includes('security-webshell.byted.org')) return true;
+    if (host.includes('relay-yg.byted.org') && pathname.includes('/bnd/webshell')) return true;
+    if (host.includes('webshell') && pathname.includes('/common/v2')) return true;
+    return false;
+  } catch {
+    const value = url.toLowerCase();
+    return value.includes('security-webshell.byted.org/') || value.includes('/bnd/webshell');
+  }
+}
+
+function looksLikeSsoUrl(url: string): boolean {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    return host.includes('sso.bytedance.com') || pathname.includes('/authentication/validate');
+  } catch {
+    return url.toLowerCase().includes('sso.bytedance.com');
+  }
 }
 
 function getRunPaths(runId: string): RunPaths {
@@ -340,23 +365,40 @@ async function probeReadiness(bm: BrowserManager): Promise<ReadinessProbe> {
   let bodyTextLen = 0;
   let iframeCount = 0;
   let terminalHintCount = 0;
+  let hasSsoSignals = false;
 
   try {
     const info = await page.evaluate(() => {
       const terminalHints = document.querySelectorAll(
         'textarea,input,[contenteditable],pre,.terminal,.xterm,.xterm-screen,.xterm-rows,[role="textbox"]'
       ).length;
+      const ssoHints = document.querySelectorAll(
+        'input[type="password"], input[name*="otp" i], input[name*="code" i], form[action*="sso" i], [data-testid*="mfa" i]'
+      ).length;
+      const titleLower = (document.title || '').toLowerCase();
+      const bodyLower = (document.body?.innerText || '').toLowerCase();
+      const textLooksLikeSso =
+        titleLower.includes('sso') ||
+        titleLower.includes('login') ||
+        bodyLower.includes('verify') ||
+        bodyLower.includes('mfa') ||
+        bodyLower.includes('otp') ||
+        bodyLower.includes('验证码') ||
+        bodyLower.includes('登录');
+
       return {
         title: document.title || '',
         bodyTextLen: (document.body?.innerText || '').trim().length,
         iframeCount: document.querySelectorAll('iframe').length,
         terminalHintCount: terminalHints,
+        hasSsoSignals: ssoHints > 0 || textLooksLikeSso,
       };
     });
     title = info.title;
     bodyTextLen = info.bodyTextLen;
     iframeCount = info.iframeCount;
     terminalHintCount = info.terminalHintCount;
+    hasSsoSignals = info.hasSsoSignals;
   } catch {
     // Best-effort readiness probe; keep defaults.
   }
@@ -365,12 +407,16 @@ async function probeReadiness(bm: BrowserManager): Promise<ReadinessProbe> {
   const hasDomSignal = bodyTextLen > 0 || iframeCount > 0;
   const hasTerminalHints = terminalHintCount > 0;
   const urlLooksLikeWebshell = looksLikeWebshellUrl(url);
+  const urlLooksLikeSso = looksLikeSsoUrl(url);
+  hasSsoSignals = hasSsoSignals || urlLooksLikeSso;
 
-  const ready = notBlank && (hasTerminalHints || hasDomSignal || urlLooksLikeWebshell);
+  const ready = notBlank && !hasSsoSignals && (hasTerminalHints || hasDomSignal || urlLooksLikeWebshell);
 
   let reason = 'ready';
   if (!notBlank) {
     reason = 'about_blank';
+  } else if (hasSsoSignals) {
+    reason = 'sso_required';
   } else if (hasTerminalHints) {
     reason = 'terminal_hint';
   } else if (hasDomSignal) {
@@ -381,7 +427,7 @@ async function probeReadiness(bm: BrowserManager): Promise<ReadinessProbe> {
     reason = 'no_dom_signal';
   }
 
-  return { ready, reason, url, title, bodyTextLen, iframeCount, terminalHintCount };
+  return { ready, reason, url, title, bodyTextLen, iframeCount, terminalHintCount, hasSsoSignals };
 }
 
 function classifyCommandRisk(command: string): CommandRisk {
@@ -532,6 +578,23 @@ async function executePreflight(
   if (probe.ready) {
     run.state = 'ready';
     run.lastError = null;
+
+    try {
+      const refreshed = await bm.exportAuthState();
+      writeAuthStateFile(run.authStatePath, refreshed);
+      appendEvent(paths, run, 'auth_saved', {
+        path: run.authStatePath,
+        cookies: refreshed.cookies.length,
+        origins: refreshed.origins.length,
+        updatedAt: refreshed.updatedAt,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      appendEvent(paths, run, 'auth_save_failed', {
+        path: run.authStatePath,
+        error: message,
+      });
+    }
   } else {
     run.state = 'auth';
     run.lastError = `readiness_probe_failed: ${probe.reason}`;
@@ -546,6 +609,7 @@ async function executePreflight(
     body_text_len: probe.bodyTextLen,
     iframe_count: probe.iframeCount,
     terminal_hint_count: probe.terminalHintCount,
+    has_sso_signals: probe.hasSsoSignals,
     since_cursor: run.sinceCursor,
   });
 

@@ -2025,6 +2025,18 @@ describe('Webshell runtime', () => {
     expect(META_COMMANDS.has('webshell')).toBe(true);
   });
 
+  test('webshell start marks auth state when SSO page is detected', async () => {
+    const runId = `ws-test-sso-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    const started = await handleMetaCommand('webshell', ['start', 'https://sso.bytedance.com/authentication/validate', runId], bm, async () => {});
+    expect(started).toContain(`Webshell run started: ${runId}`);
+
+    const status = await handleMetaCommand('webshell', ['status', runId], bm, async () => {});
+    expect(status).toContain(`run_id=${runId}`);
+    expect(status).toContain('state=auth');
+    expect(status).toContain('last_error=readiness_probe_failed: sso_required');
+  });
+
   test('webshell start/status/finish lifecycle writes run state', async () => {
     await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
     const runId = `ws-test-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
@@ -2181,6 +2193,19 @@ describe('Auth cache', () => {
   test('auth-load throws when file is missing', async () => {
     const p = `/tmp/browse-auth-load-missing-${Date.now()}.json`;
     await expect(handleMetaCommand('auth-load', [p], bm, async () => {})).rejects.toThrow('Auth state file not found');
+  });
+
+  test('resume persists refreshed auth state to default auth file', async () => {
+    const authPath = process.env.BROWSE_AUTH_STATE_FILE || `${process.env.HOME || '/tmp'}/.gstack/browse-auth-state.json`;
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+
+    const resumed = await handleMetaCommand('resume', [], bm, async () => {});
+    expect(resumed).toContain('RESUMED');
+
+    const saved = JSON.parse(fs.readFileSync(authPath, 'utf-8')) as { cookies?: unknown[]; origins?: unknown[]; updatedAt?: string };
+    expect(Array.isArray(saved.cookies)).toBe(true);
+    expect(Array.isArray(saved.origins)).toBe(true);
+    expect(typeof saved.updatedAt).toBe('string');
   });
 
   test('auth-save/auth-load restores cookie and localStorage', async () => {

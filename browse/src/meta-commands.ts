@@ -391,6 +391,13 @@ export async function handleMetaCommand(
 
     case 'resume': {
       bm.resume();
+      // Persist refreshed auth after user handoff so subsequent sessions can reuse SSO.
+      try {
+        const state = await bm.exportAuthState();
+        writeAuthStateFile(BROWSE_CONFIG.authStateFile, state);
+      } catch {
+        // Best-effort: resume should not fail if auth snapshot can't be written.
+      }
       // Re-snapshot to capture current page state after human interaction
       const snapshot = await handleSnapshot(['-i'], bm);
       return `RESUMED\n${snapshot}`;

@@ -23,7 +23,7 @@ export interface AuthStateFile {
 
 export function writeAuthStateFile(filePath: string, data: AuthStateFile): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }
 
 export function readAuthStateFile(filePath: string): AuthStateFile {
