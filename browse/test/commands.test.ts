@@ -2243,4 +2243,38 @@ describe('Auth cache', () => {
 
     fs.unlinkSync(p);
   });
+
+  test('auth-load does not create a new tab or page', async () => {
+    const p = `/tmp/browse-auth-no-new-tab-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
+    const lsKey = 'auth_no_new_tab_key';
+    const lsValue = 'auth_no_new_tab_value';
+
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    await handleReadCommand('js', [`localStorage.setItem("${lsKey}", "${lsValue}"); "ok"`], bm);
+    await handleMetaCommand('auth-save', [p], bm, async () => {});
+
+    await handleReadCommand('js', [`localStorage.removeItem("${lsKey}"); localStorage.getItem("${lsKey}")`], bm);
+
+    const context = bm.getPage().context();
+    const originalNewPage = context.newPage.bind(context);
+    let newPageCalls = 0;
+    (context as any).newPage = async (...args: any[]) => {
+      newPageCalls += 1;
+      return await originalNewPage(...args);
+    };
+
+    try {
+      const tabCountBefore = bm.getTabCount();
+      const loaded = await handleMetaCommand('auth-load', [p], bm, async () => {});
+      expect(loaded).toContain('Auth state loaded:');
+      expect(newPageCalls).toBe(0);
+      expect(bm.getTabCount()).toBe(tabCountBefore);
+
+      const restoredLocalStorage = await handleReadCommand('js', [`localStorage.getItem("${lsKey}")`], bm);
+      expect(restoredLocalStorage).toBe(lsValue);
+    } finally {
+      (context as any).newPage = originalNewPage;
+      fs.unlinkSync(p);
+    }
+  });
 });

@@ -439,31 +439,29 @@ export class BrowserManager {
     }
 
     const origins = Array.isArray(state.origins) ? state.origins : [];
-    for (const originState of origins) {
-      if (!originState.origin) continue;
-      const p = await this.context.newPage();
-      try {
-        await p.goto(originState.origin, { waitUntil: 'domcontentloaded', timeout: 10000 });
-        if (Array.isArray(originState.localStorage) && originState.localStorage.length > 0) {
-          await p.evaluate((items: Array<{ name: string; value: string }>) => {
-            for (const item of items) {
+    if (origins.length > 0) {
+      // Seed localStorage for matching origins without opening a visible tab.
+      await this.context.addInitScript((savedOrigins: SavedAuthState['origins']) => {
+        try {
+          const currentOrigin = location.origin;
+          for (const originState of savedOrigins || []) {
+            if (!originState?.origin || originState.origin !== currentOrigin) continue;
+            for (const item of originState.localStorage || []) {
               localStorage.setItem(item.name, item.value);
             }
-          }, originState.localStorage);
+          }
+        } catch {
+          // Ignore per-page storage restore failures.
         }
-      } catch {
-        // Ignore individual origin restore failures.
-      } finally {
-        await p.close().catch(() => {});
-      }
+      }, origins);
     }
 
-    // Refresh current page to apply newly injected storage/cookies.
+    // Refresh current page so the injected auth state takes effect immediately.
     try {
       const page = this.getPage();
       const url = page.url();
       if (url && url !== 'about:blank') {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
       }
     } catch {
       // Ignore refresh failures.
