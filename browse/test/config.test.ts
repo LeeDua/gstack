@@ -38,6 +38,20 @@ describe('config', () => {
       expect(config.dialogLog).toBe(path.join(config.stateDir, 'browse-dialog.log'));
       expect(config.websocketLog).toBe(path.join(config.stateDir, 'browse-websocket.log'));
     });
+
+    test('auth and webshell roots default under HOME/.gstack', () => {
+      const config = resolveConfig({ HOME: '/tmp/home-config-test' });
+      expect(config.authStateFile).toBe('/tmp/home-config-test/.gstack/browse-auth-state.json');
+      expect(config.webshellRunRoot).toBe('/tmp/home-config-test/.gstack/webshell-runs');
+    });
+
+    test('webshell run root supports env override', () => {
+      const config = resolveConfig({
+        HOME: '/tmp/home-config-test',
+        BROWSE_WEBSHELL_RUN_ROOT: '/tmp/custom-webshell-runs',
+      });
+      expect(config.webshellRunRoot).toBe('/tmp/custom-webshell-runs');
+    });
   });
 
   describe('ensureStateDir', () => {
@@ -59,6 +73,21 @@ describe('config', () => {
       ensureStateDir(config); // should not throw
       expect(fs.existsSync(config.stateDir)).toBe(true);
       // Cleanup
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    test('creates auth and webshell directories', () => {
+      const tmpDir = path.join(os.tmpdir(), `browse-config-test-${Date.now()}`);
+      const stateFile = path.join(tmpDir, '.gstack', 'browse.json');
+      const config = resolveConfig({
+        BROWSE_STATE_FILE: stateFile,
+        BROWSE_AUTH_STATE_FILE: path.join(tmpDir, '.global', 'auth.json'),
+        BROWSE_WEBSHELL_RUN_ROOT: path.join(tmpDir, '.global', 'webshell-runs'),
+      });
+      ensureStateDir(config);
+      expect(fs.existsSync(config.stateDir)).toBe(true);
+      expect(fs.existsSync(path.dirname(config.authStateFile))).toBe(true);
+      expect(fs.existsSync(config.webshellRunRoot)).toBe(true);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

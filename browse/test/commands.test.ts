@@ -16,6 +16,7 @@ import { consoleBuffer, networkBuffer, dialogBuffer, websocketBuffer, addConsole
 import * as fs from 'fs';
 import { spawn } from 'child_process';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 let testServer: ReturnType<typeof startTestServer>;
 let bm: BrowserManager;
@@ -393,6 +394,32 @@ describe('SPA and buffers', () => {
     expect(result).toContain('cleared');
     const after = await handleReadCommand('websocket', [], bm);
     expect(after).toContain('no websocket activity');
+  });
+
+  test('websocket --since supports incremental reads with NEXT_SINCE cursor', async () => {
+    await handleReadCommand('websocket', ['--clear'], bm);
+    await handleWriteCommand('goto', [baseUrl + '/websocket.html'], bm);
+    await Bun.sleep(700);
+
+    const first = await handleReadCommand('websocket', ['--since', '0'], bm);
+    expect(first).toContain('NEXT_SINCE ');
+    expect(first).toContain('[#');
+    expect(first).toContain('[open]');
+
+    const m = first.match(/NEXT_SINCE\s+(\d+)$/m);
+    expect(m).toBeTruthy();
+    const cursor = Number(m![1]);
+    expect(Number.isFinite(cursor)).toBe(true);
+
+    const second = await handleReadCommand('websocket', ['--since', String(cursor)], bm);
+    expect(second).toContain(`(no websocket activity since ${cursor})`);
+    expect(second).toContain(`NEXT_SINCE ${cursor}`);
+  });
+
+  test('websocket rejects using --tail and --since together', async () => {
+    await expect(handleReadCommand('websocket', ['--tail', '10', '--since', '1'], bm)).rejects.toThrow(
+      '--tail and --since cannot be used together'
+    );
   });
 
   test('observe returns JSONL deltas with done event', async () => {
@@ -1975,5 +2002,220 @@ describe('Chain with cookie-import', () => {
     } finally {
       try { fs.unlinkSync(tmpCookies); } catch {}
     }
+  });
+});
+
+
+
+// ─── Command registry coverage ─────────────────────────────
+
+describe('Command registry coverage', () => {
+  test('auth commands are included in META_COMMANDS', async () => {
+    const { META_COMMANDS } = await import('../src/commands');
+    expect(META_COMMANDS.has('auth-save')).toBe(true);
+    expect(META_COMMANDS.has('auth-load')).toBe(true);
+    expect(META_COMMANDS.has('auth-status')).toBe(true);
+  });
+});
+// ─── Auth Cache ─────────────────────────────────────────────
+
+describe('Webshell runtime', () => {
+  test('webshell command is included in META_COMMANDS', async () => {
+    const { META_COMMANDS } = await import('../src/commands');
+    expect(META_COMMANDS.has('webshell')).toBe(true);
+  });
+
+  test('webshell start/status/finish lifecycle writes run state', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    const started = await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    expect(started).toContain(`Webshell run started: ${runId}`);
+
+    const status = await handleMetaCommand('webshell', ['status', runId], bm, async () => {});
+    expect(status).toContain(`run_id=${runId}`);
+    expect(status).toContain('state=ready');
+
+    const finished = await handleMetaCommand('webshell', ['finish', runId], bm, async () => {});
+    expect(finished).toContain(`Webshell run finished: ${runId}`);
+
+    const statusAfterFinish = await handleMetaCommand('webshell', ['status', runId], bm, async () => {});
+    expect(statusAfterFinish).toContain('state=completed');
+  });
+
+  test('webshell cmd records output and ms timings', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    await handleReadCommand('websocket', ['--clear'], bm);
+    const runId = `ws-test-cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+    const prevMarker = process.env.BROWSE_WEBSHELL_FIXED_MARKER;
+    const marker = `testmarker_${Date.now()}`;
+    process.env.BROWSE_WEBSHELL_FIXED_MARKER = marker;
+
+    try {
+      await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+      const cmdPromise = handleMetaCommand('webshell', ['cmd', runId, '--', 'echo', 'hello_webshell_runtime'], bm, async () => {});
+      await Bun.sleep(80);
+      addWebSocketEntry({
+        timestamp: Date.now(),
+        url: 'ws://test.local/webshell',
+        direction: 'in',
+        payload: `__GS_BEGIN_${marker}__\nhello_webshell_runtime\n__GS_END_${marker}__\n`,
+      });
+      const result = await cmdPromise;
+
+      expect(result).toContain(`run_id=${runId}`);
+      expect(result).toContain('timing_ms input_to_result=');
+      expect(result).toContain('hello_webshell_runtime');
+      expect(result).toContain('state=ready');
+    } finally {
+      if (prevMarker === undefined) {
+        delete process.env.BROWSE_WEBSHELL_FIXED_MARKER;
+      } else {
+        process.env.BROWSE_WEBSHELL_FIXED_MARKER = prevMarker;
+      }
+    }
+  });
+
+  test('webshell cmd ignores echoed wrapper marker pair and captures real output', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    await handleReadCommand('websocket', ['--clear'], bm);
+    const runId = `ws-test-echoed-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+    const prevMarker = process.env.BROWSE_WEBSHELL_FIXED_MARKER;
+    const marker = `testmarker_echoed_${Date.now()}`;
+    process.env.BROWSE_WEBSHELL_FIXED_MARKER = marker;
+
+    try {
+      await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+      const cmdPromise = handleMetaCommand('webshell', ['cmd', runId, '--', 'echo', 'hello_echoed_wrapper'], bm, async () => {});
+      await Bun.sleep(80);
+
+      addWebSocketEntry({
+        timestamp: Date.now(),
+        url: 'ws://test.local/webshell',
+        direction: 'in',
+        payload: `__GS_BEGIN_${marker}__\n\\n'; echo hello_echoed_wrapper; printf '\\n__GS_END_${marker}__\n`,
+      });
+      addWebSocketEntry({
+        timestamp: Date.now(),
+        url: 'ws://test.local/webshell',
+        direction: 'in',
+        payload: `__GS_BEGIN_${marker}__\nhello_echoed_wrapper\n__GS_END_${marker}__\n`,
+      });
+
+      const result = await cmdPromise;
+      expect(result).toContain(`run_id=${runId}`);
+      expect(result).toContain('hello_echoed_wrapper');
+      expect(result).not.toContain("\\n'; echo hello_echoed_wrapper; printf '\\n");
+      expect(result).toContain('state=ready');
+    } finally {
+      if (prevMarker === undefined) {
+        delete process.env.BROWSE_WEBSHELL_FIXED_MARKER;
+      } else {
+        process.env.BROWSE_WEBSHELL_FIXED_MARKER = prevMarker;
+      }
+    }
+  });
+
+  test('webshell cmd blocks risky command without --confirm', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-risk-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    await expect(handleMetaCommand('webshell', ['cmd', runId, '--', 'rm -rf /tmp/foo'], bm, async () => {}))
+      .rejects.toThrow('Command classified as review');
+  });
+
+  test('webshell list returns known run', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-list-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    const listed = await handleMetaCommand('webshell', ['list'], bm, async () => {});
+    expect(listed).toContain(runId);
+  });
+
+  test('webshell set updates poll and timeout config', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-set-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    await handleMetaCommand('webshell', ['set', runId, 'poll_interval_ms', '80'], bm, async () => {});
+    await handleMetaCommand('webshell', ['set', runId, 'timeout_ms', '15000'], bm, async () => {});
+    await handleMetaCommand('webshell', ['set', runId, 'no_frame_timeout_ms', '900'], bm, async () => {});
+
+    const status = await handleMetaCommand('webshell', ['status', runId], bm, async () => {});
+    expect(status).toContain('poll_interval_ms=80');
+    expect(status).toContain('timeout_ms=15000');
+    expect(status).toContain('no_frame_timeout_ms=900');
+  });
+
+  test('webshell cmd on risky command with --confirm executes', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-confirm-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    const result = await handleMetaCommand('webshell', ['cmd', runId, '--confirm', '--', 'rm -rf /tmp/webshell_test_dir_nonexistent'], bm, async () => {});
+    expect(result).toContain(`run_id=${runId}`);
+    expect(result).toContain('risk=review confirmed=true');
+    expect(result).toContain('timing_ms input_to_result=');
+  });
+
+  test('webshell set rejects unknown key', async () => {
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    const runId = `ws-test-badkey-${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${crypto.randomUUID().slice(0, 4)}`;
+
+    await handleMetaCommand('webshell', ['start', baseUrl + '/basic.html', runId], bm, async () => {});
+    await expect(handleMetaCommand('webshell', ['set', runId, 'bad_key', 'v'], bm, async () => {}))
+      .rejects.toThrow('Unknown key');
+  });
+});
+
+describe('Auth cache', () => {
+  test('auth-status reports missing when file does not exist', async () => {
+    const p = `/tmp/browse-auth-status-missing-${Date.now()}.json`;
+    const result = await handleMetaCommand('auth-status', [p], bm, async () => {});
+    expect(result).toContain('Auth state: missing');
+    expect(result).toContain(`path=${p}`);
+  });
+
+  test('auth-load throws when file is missing', async () => {
+    const p = `/tmp/browse-auth-load-missing-${Date.now()}.json`;
+    await expect(handleMetaCommand('auth-load', [p], bm, async () => {})).rejects.toThrow('Auth state file not found');
+  });
+
+  test('auth-save/auth-load restores cookie and localStorage', async () => {
+    const p = `/tmp/browse-auth-state-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
+    const cookieName = 'auth_test_cookie';
+    const cookieValue = 'token123';
+    const lsKey = 'auth_test_key';
+    const lsValue = 'value123';
+
+    await handleWriteCommand('goto', [baseUrl + '/basic.html'], bm);
+    await handleWriteCommand('cookie', [`${cookieName}=${cookieValue}`], bm);
+    await handleReadCommand('js', [`localStorage.setItem("${lsKey}", "${lsValue}"); "ok"`], bm);
+
+    const saved = await handleMetaCommand('auth-save', [p], bm, async () => {});
+    expect(saved).toContain('Auth state saved:');
+    expect(saved).toContain('cookies=');
+    expect(saved).toContain('origins=');
+    expect(fs.existsSync(p)).toBe(true);
+
+    // Simulate auth loss in current context.
+    await bm.getPage().context().clearCookies();
+    await handleReadCommand('js', [`localStorage.removeItem("${lsKey}"); localStorage.getItem("${lsKey}")`], bm);
+
+    const cookiesAfterClear = JSON.parse(await handleReadCommand('cookies', [], bm));
+    expect(cookiesAfterClear.some((c: any) => c.name === cookieName && c.value === cookieValue)).toBe(false);
+
+    const loaded = await handleMetaCommand('auth-load', [p], bm, async () => {});
+    expect(loaded).toContain('Auth state loaded:');
+
+    const cookiesAfterLoad = JSON.parse(await handleReadCommand('cookies', [], bm));
+    expect(cookiesAfterLoad.some((c: any) => c.name === cookieName && c.value === cookieValue)).toBe(true);
+
+    const restoredLocalStorage = await handleReadCommand('js', [`localStorage.getItem("${lsKey}")`], bm);
+    expect(restoredLocalStorage).toBe(lsValue);
+
+    fs.unlinkSync(p);
   });
 });

@@ -32,6 +32,7 @@ export const META_COMMANDS = new Set([
   'chain', 'diff',
   'url', 'snapshot',
   'handoff', 'resume',
+  'auth-save', 'auth-load', 'auth-status', 'webshell',
 ]);
 
 export const ALL_COMMANDS = new Set([...READ_COMMANDS, ...WRITE_COMMANDS, ...META_COMMANDS]);
@@ -57,7 +58,7 @@ export const COMMAND_DESCRIPTIONS: Record<string, { category: string; descriptio
   'is':      { category: 'Inspection', description: 'State check (visible/hidden/enabled/disabled/checked/editable/focused)', usage: 'is <prop> <sel>' },
   'console': { category: 'Inspection', description: 'Console messages (--errors filters to error/warning)', usage: 'console [--clear|--errors]' },
   'network': { category: 'Inspection', description: 'Network requests', usage: 'network [--clear]' },
-  'websocket': { category: 'Inspection', description: 'WebSocket frames and lifecycle events', usage: 'websocket [--clear] [--tail N]' },
+  'websocket': { category: 'Inspection', description: 'WebSocket frames and lifecycle events', usage: 'websocket [--clear] [--tail N] [--since N]' },
   'dialog':  { category: 'Inspection', description: 'Dialog messages', usage: 'dialog [--clear]' },
   'cookies': { category: 'Inspection', description: 'All cookies as JSON' },
   'storage': { category: 'Inspection', description: 'Read all localStorage + sessionStorage as JSON, or set <key> <value> to write localStorage', usage: 'storage [set k v]' },
@@ -103,6 +104,10 @@ export const COMMAND_DESCRIPTIONS: Record<string, { category: string; descriptio
   // Handoff
   'handoff': { category: 'Server', description: 'Open visible Chrome at current page for user takeover', usage: 'handoff [message]' },
   'resume':  { category: 'Server', description: 'Re-snapshot after user takeover, return control to AI', usage: 'resume' },
+  'auth-save': { category: 'Server', description: 'Save current auth state (cookies + localStorage) for cross-session reuse', usage: 'auth-save [file]' },
+  'auth-load': { category: 'Server', description: 'Load saved auth state into current session', usage: 'auth-load [file]' },
+  'auth-status': { category: 'Server', description: 'Show saved auth state metadata', usage: 'auth-status [file]' },
+  'webshell': { category: 'Server', description: 'Run browser-first webshell session with preflight, incremental command execution, and local run ledger', usage: 'webshell <subcommand>' },
 };
 
 // Load-time validation: descriptions must cover exactly the command sets

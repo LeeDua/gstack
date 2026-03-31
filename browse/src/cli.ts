@@ -99,7 +99,13 @@ function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err: unknown) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code === 'EPERM') {
+      // In restricted environments we may not signal foreign processes.
+      // Treat as alive to avoid unnecessary server restarts/port rebind attempts.
+      return true;
+    }
     return false;
   }
 }
@@ -212,6 +218,7 @@ async function startServer(): Promise<ServerState> {
  */
 function acquireServerLock(): (() => void) | null {
   const lockPath = `${config.stateFile}.lock`;
+  try { fs.mkdirSync(path.dirname(lockPath), { recursive: true }); } catch {}
   try {
     // O_CREAT | O_EXCL — fails if file already exists (atomic check-and-create)
     const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
@@ -460,7 +467,7 @@ Interaction:    click <sel> | fill <sel> <val> | select <sel> <val>
                 cookie-import <json-file>
                 cookie-import-browser [browser] [--domain <d>]
 Inspection:     js <expr> | eval <file> | css <sel> <prop> | attrs <sel>
-                console [--clear|--errors] | network [--clear] | websocket [--clear] [--tail N] | dialog [--clear]
+                console [--clear|--errors] | network [--clear] | websocket [--clear] [--tail N] [--since N] | dialog [--clear]
                 cookies | storage [set <k> <v>] | perf
                 is <prop> <sel> (visible|hidden|enabled|disabled|checked|editable|focused)
                 observe <sel|@ref> [--interval-ms N] [--duration-ms N]
@@ -475,7 +482,8 @@ Compare:        diff <url1> <url2>
 Multi-step:     chain (reads JSON from stdin)
 Tabs:           tabs | tab <id> | newtab [url] | closetab [id]
 Server:         status | sessions | session-kill <name> | cookie <n>=<v> | header <n>:<v>
-                useragent <str> | stop | restart
+                useragent <str> | auth-save [file] | auth-load [file] | auth-status [file]
+                webshell <subcommand> | stop | restart
 Dialogs:        dialog-accept [text] | dialog-dismiss
 
 Refs:           After 'snapshot', use @e1, @e2... as selectors:

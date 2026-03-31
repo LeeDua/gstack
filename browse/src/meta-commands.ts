@@ -10,7 +10,21 @@ import { validateNavigationUrl } from './url-validation';
 import * as Diff from 'diff';
 import * as fs from 'fs';
 import * as path from 'path';
+import { resolveConfig } from './config';
+import {
+  webshellUsage,
+  listWebshellRuns,
+  startWebshellRun,
+  preflightWebshellRun,
+  getWebshellRunStatus,
+  setWebshellRunConfig,
+  executeWebshellRunCommand,
+  finishWebshellRun,
+} from './webshell-runtime';
+import { readAuthStateFile, writeAuthStateFile } from './auth-state';
 import { TEMP_DIR, isPathWithin } from './platform';
+
+const BROWSE_CONFIG = resolveConfig();
 
 // Security: Path validation to prevent path traversal attacks
 const SAFE_DIRECTORIES = [TEMP_DIR, process.cwd()];
@@ -42,18 +56,23 @@ function isProcessAlive(pid: number): boolean {
 
 function getSessionRootsFromEnv(): string[] {
   const roots: string[] = [];
+  let hasExplicitRoot = false;
 
   if (process.env.BROWSE_STATE_ROOT) {
     roots.push(process.env.BROWSE_STATE_ROOT);
+    hasExplicitRoot = true;
   }
 
   if (process.env.BROWSE_STATE_FILE) {
     // Typical structure: <root>/<session>/browse.json
     roots.push(path.dirname(path.dirname(process.env.BROWSE_STATE_FILE)));
+    hasExplicitRoot = true;
   }
 
-  const tmpRoot = process.env.TMPDIR || '/tmp';
-  roots.push(path.join(tmpRoot, 'gstack-browse-sessions'));
+  if (!hasExplicitRoot) {
+    const tmpRoot = process.env.TMPDIR || '/tmp';
+    roots.push(path.join(tmpRoot, 'gstack-browse-sessions'));
+  }
 
   return [...new Set(roots.map(r => path.resolve(r)))];
 }
@@ -375,6 +394,138 @@ export async function handleMetaCommand(
       // Re-snapshot to capture current page state after human interaction
       const snapshot = await handleSnapshot(['-i'], bm);
       return `RESUMED\n${snapshot}`;
+    }
+
+    // ─── Auth Cache ─────────────────────────────────
+    case 'auth-save': {
+      const savePath = args[0]
+        ? path.resolve(args[0])
+        : BROWSE_CONFIG.authStateFile;
+      const state = await bm.exportAuthState();
+      writeAuthStateFile(savePath, state);
+      return [
+        `Auth state saved: ${savePath}`,
+        `cookies=${state.cookies.length}`,
+        `origins=${state.origins.length}`,
+        `updatedAt=${state.updatedAt}`,
+      ].join('\n');
+    }
+
+    case 'auth-load': {
+      const loadPath = args[0]
+        ? path.resolve(args[0])
+        : BROWSE_CONFIG.authStateFile;
+      if (!fs.existsSync(loadPath)) {
+        throw new Error(`Auth state file not found: ${loadPath}`);
+      }
+      const state = readAuthStateFile(loadPath);
+      const restored = await bm.importAuthState(state);
+      return [
+        `Auth state loaded: ${loadPath}`,
+        `cookies=${restored.cookies}`,
+        `origins=${restored.origins}`,
+        `updatedAt=${state.updatedAt}`,
+      ].join('\n');
+    }
+
+    case 'auth-status': {
+      const authPath = args[0]
+        ? path.resolve(args[0])
+        : BROWSE_CONFIG.authStateFile;
+      if (!fs.existsSync(authPath)) {
+        return `Auth state: missing\npath=${authPath}`;
+      }
+      const state = readAuthStateFile(authPath);
+      return [
+        'Auth state: present',
+        `path=${authPath}`,
+        `updatedAt=${state.updatedAt}`,
+        `cookies=${state.cookies.length}`,
+        `origins=${state.origins.length}`,
+        `sourceUrl=${state.sourceUrl || ''}`,
+      ].join('\n');
+    }
+
+    // ─── Webshell Runtime ───────────────────────────
+    case 'webshell': {
+      const sub = args[0];
+      if (!sub || sub === '--help' || sub === '-h') {
+        return webshellUsage();
+      }
+
+      if (sub === 'list') {
+        return listWebshellRuns();
+      }
+
+      if (sub === 'start') {
+        const targetUrl = args[1];
+        const requestedRunId = args[2];
+        if (!targetUrl) {
+          throw new Error('Usage: browse webshell start <target_url> [run_id]');
+        }
+        return await startWebshellRun(targetUrl, requestedRunId, bm);
+      }
+
+      if (sub === 'preflight') {
+        const runId = args[1];
+        const targetUrl = args[2];
+        if (!runId) {
+          throw new Error('Usage: browse webshell preflight <run_id> [target_url]');
+        }
+        return await preflightWebshellRun(runId, bm, targetUrl);
+      }
+
+      if (sub === 'status') {
+        const runId = args[1];
+        if (!runId) {
+          throw new Error('Usage: browse webshell status <run_id>');
+        }
+        return getWebshellRunStatus(runId);
+      }
+
+      if (sub === 'set') {
+        const runId = args[1];
+        const key = args[2];
+        const rawValue = args.slice(3).join(' ');
+        if (!runId || !key || !rawValue) {
+          throw new Error('Usage: browse webshell set <run_id> <focus_selector|poll_interval_ms|timeout_ms|no_frame_timeout_ms|auth_state_path|auth_loaded> <value>');
+        }
+        return setWebshellRunConfig(runId, key, rawValue);
+      }
+
+      if (sub === 'cmd') {
+        const runId = args[1];
+        if (!runId) {
+          throw new Error('Usage: browse webshell cmd <run_id> [--confirm] [--] <shell_command...>');
+        }
+
+        let i = 2;
+        let confirm = false;
+        if (args[i] === '--confirm') {
+          confirm = true;
+          i += 1;
+        }
+        if (args[i] === '--') {
+          i += 1;
+        }
+
+        const shellCommand = args.slice(i).join(' ').trim();
+        if (!shellCommand) {
+          throw new Error('Usage: browse webshell cmd <run_id> [--confirm] [--] <shell_command...>');
+        }
+
+        return await executeWebshellRunCommand(runId, shellCommand, bm, { confirm });
+      }
+
+      if (sub === 'finish') {
+        const runId = args[1];
+        if (!runId) {
+          throw new Error('Usage: browse webshell finish <run_id>');
+        }
+        return finishWebshellRun(runId);
+      }
+
+      throw new Error(`Unknown webshell subcommand: ${sub}\n\n${webshellUsage()}`);
     }
 
     default:

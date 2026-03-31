@@ -2,8 +2,8 @@
  * Shared config for browse CLI + server.
  *
  * Resolution:
- *   1. BROWSE_STATE_FILE env → derive stateDir from parent
- *   2. git rev-parse --show-toplevel → projectDir/.gstack/
+ *   1. BROWSE_STATE_FILE env -> derive stateDir from parent
+ *   2. git rev-parse --show-toplevel -> projectDir/.gstack/
  *   3. process.cwd() fallback (non-git environments)
  *
  * The CLI computes the config and passes BROWSE_STATE_FILE to the
@@ -17,6 +17,8 @@ export interface BrowseConfig {
   projectDir: string;
   stateDir: string;
   stateFile: string;
+  authStateFile: string;
+  webshellRunRoot: string;
   consoleLog: string;
   networkLog: string;
   dialogLog: string;
@@ -31,7 +33,7 @@ export function getGitRoot(): string | null {
     const proc = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
       stdout: 'pipe',
       stderr: 'pipe',
-      timeout: 2_000, // Don't hang if .git is broken
+      timeout: 2_000,
     });
     if (proc.exitCode !== 0) return null;
     return proc.stdout.toString().trim() || null;
@@ -57,17 +59,23 @@ export function resolveConfig(
   if (env.BROWSE_STATE_FILE) {
     stateFile = env.BROWSE_STATE_FILE;
     stateDir = path.dirname(stateFile);
-    projectDir = path.dirname(stateDir); // parent of .gstack/
+    projectDir = path.dirname(stateDir);
   } else {
     projectDir = getGitRoot() || process.cwd();
     stateDir = path.join(projectDir, '.gstack');
     stateFile = path.join(stateDir, 'browse.json');
   }
 
+  const globalRoot = path.join(env.HOME || projectDir, '.gstack');
+  const authStateFile = env.BROWSE_AUTH_STATE_FILE || path.join(globalRoot, 'browse-auth-state.json');
+  const webshellRunRoot = env.BROWSE_WEBSHELL_RUN_ROOT || path.join(globalRoot, 'webshell-runs');
+
   return {
     projectDir,
     stateDir,
     stateFile,
+    authStateFile,
+    webshellRunRoot,
     consoleLog: path.join(stateDir, 'browse-console.log'),
     networkLog: path.join(stateDir, 'browse-network.log'),
     dialogLog: path.join(stateDir, 'browse-dialog.log'),
@@ -82,6 +90,8 @@ export function resolveConfig(
 export function ensureStateDir(config: BrowseConfig): void {
   try {
     fs.mkdirSync(config.stateDir, { recursive: true });
+    fs.mkdirSync(path.dirname(config.authStateFile), { recursive: true });
+    fs.mkdirSync(config.webshellRunRoot, { recursive: true });
   } catch (err: any) {
     if (err.code === 'EACCES') {
       throw new Error(`Cannot create state directory ${config.stateDir}: permission denied`);
@@ -92,7 +102,6 @@ export function ensureStateDir(config: BrowseConfig): void {
     throw err;
   }
 
-  // Ensure .gstack/ is in the project's .gitignore
   const gitignorePath = path.join(config.projectDir, '.gitignore');
   try {
     const content = fs.readFileSync(gitignorePath, 'utf-8');
@@ -102,15 +111,13 @@ export function ensureStateDir(config: BrowseConfig): void {
     }
   } catch (err: any) {
     if (err.code !== 'ENOENT') {
-      // Write warning to server log (visible even in daemon mode)
       const logPath = path.join(config.stateDir, 'browse-server.log');
       try {
         fs.appendFileSync(logPath, `[${new Date().toISOString()}] Warning: could not update .gitignore at ${gitignorePath}: ${err.message}\n`);
       } catch {
-        // stateDir write failed too — nothing more we can do
+        // noop
       }
     }
-    // ENOENT (no .gitignore) — skip silently
   }
 }
 
@@ -127,8 +134,6 @@ export function getRemoteSlug(): string {
     });
     if (proc.exitCode !== 0) throw new Error('no remote');
     const url = proc.stdout.toString().trim();
-    // SSH:   git@github.com:owner/repo.git → owner-repo
-    // HTTPS: https://github.com/owner/repo.git → owner-repo
     const match = url.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
     if (match) return `${match[1]}-${match[2]}`;
     throw new Error('unparseable');

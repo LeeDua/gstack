@@ -652,7 +652,7 @@ Refs are invalidated on navigation — run `snapshot` again after `goto`.
 | `observe <sel|@ref> [--interval-ms N] [--duration-ms N] [--mode text|html|value] [--stable-ms N] [--max-chars N] [--redact on|off]` | Observe selector output in intervals and return incremental JSONL deltas |
 | `perf` | Page load timings |
 | `storage [set k v]` | Read all localStorage + sessionStorage as JSON, or set <key> <value> to write localStorage |
-| `websocket [--clear] [--tail N]` | WebSocket frames and lifecycle events |
+| `websocket [--clear] [--tail N] [--since N]` | WebSocket frames and lifecycle events |
 
 ### Visual
 | Command | Description |
@@ -683,6 +683,9 @@ Refs are invalidated on navigation — run `snapshot` again after `goto`.
 ### Server
 | Command | Description |
 |---------|-------------|
+| `auth-load [file]` | Load saved auth state into current session |
+| `auth-save [file]` | Save current auth state (cookies + localStorage) for cross-session reuse |
+| `auth-status [file]` | Show saved auth state metadata |
 | `handoff [message]` | Open visible Chrome at current page for user takeover |
 | `restart` | Restart server |
 | `resume` | Re-snapshot after user takeover, return control to AI |
@@ -690,6 +693,7 @@ Refs are invalidated on navigation — run `snapshot` again after `goto`.
 | `sessions` | List local browse session names and state files discovered from session roots |
 | `status` | Health check |
 | `stop` | Shutdown server |
+| `webshell <subcommand>` | Run browser-first webshell session with preflight, incremental command execution, and local run ledger |
 
 ## Tips
 

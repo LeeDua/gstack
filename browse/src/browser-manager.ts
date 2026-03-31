@@ -34,6 +34,17 @@ export interface BrowserState {
   }>;
 }
 
+export interface SavedAuthState {
+  version: number;
+  updatedAt: string;
+  sourceUrl: string;
+  cookies: Cookie[];
+  origins: Array<{
+    origin: string;
+    localStorage: Array<{ name: string; value: string }>;
+  }>;
+}
+
 export class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -376,6 +387,89 @@ export class BrowserManager {
 
     // Clear refs — pages are new, locators are stale
     this.clearRefs();
+  }
+
+  /** Capture durable auth state for cross-session reuse (cookies + localStorage by origin). */
+  async exportAuthState(): Promise<SavedAuthState> {
+    if (!this.context) throw new Error('Browser not launched');
+
+    const cookies = await this.context.cookies();
+    const originMap = new Map<string, Array<{ name: string; value: string }>>();
+    const pages = [...this.pages.values()];
+
+    for (const page of pages) {
+      const url = page.url();
+      if (!url || url === 'about:blank') continue;
+      let origin: string;
+      try {
+        origin = new URL(url).origin;
+      } catch {
+        continue;
+      }
+
+      try {
+        const entries = await page.evaluate(() =>
+          Object.entries(localStorage).map(([name, value]) => ({ name, value: String(value) }))
+        );
+        const existing = originMap.get(origin) || [];
+        const merged = new Map(existing.map((e) => [e.name, e.value]));
+        for (const item of entries) merged.set(item.name, item.value);
+        originMap.set(origin, [...merged.entries()].map(([name, value]) => ({ name, value })));
+      } catch {
+        // Ignore origins where localStorage is unavailable.
+      }
+    }
+
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      sourceUrl: this.getCurrentUrl(),
+      cookies,
+      origins: [...originMap.entries()].map(([origin, localStorage]) => ({ origin, localStorage })),
+    };
+  }
+
+  /** Restore durable auth state into current context and best-effort refresh current page. */
+  async importAuthState(state: SavedAuthState): Promise<{ cookies: number; origins: number }> {
+    if (!this.context) throw new Error('Browser not launched');
+
+    const cookies = Array.isArray(state.cookies) ? state.cookies : [];
+    if (cookies.length > 0) {
+      await this.context.addCookies(cookies);
+    }
+
+    const origins = Array.isArray(state.origins) ? state.origins : [];
+    for (const originState of origins) {
+      if (!originState.origin) continue;
+      const p = await this.context.newPage();
+      try {
+        await p.goto(originState.origin, { waitUntil: 'domcontentloaded', timeout: 10000 });
+        if (Array.isArray(originState.localStorage) && originState.localStorage.length > 0) {
+          await p.evaluate((items: Array<{ name: string; value: string }>) => {
+            for (const item of items) {
+              localStorage.setItem(item.name, item.value);
+            }
+          }, originState.localStorage);
+        }
+      } catch {
+        // Ignore individual origin restore failures.
+      } finally {
+        await p.close().catch(() => {});
+      }
+    }
+
+    // Refresh current page to apply newly injected storage/cookies.
+    try {
+      const page = this.getPage();
+      const url = page.url();
+      if (url && url !== 'about:blank') {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      }
+    } catch {
+      // Ignore refresh failures.
+    }
+
+    return { cookies: cookies.length, origins: origins.length };
   }
 
   /**

@@ -381,32 +381,84 @@ export async function handleReadCommand(
 
     case 'websocket': {
       const { args: cmdArgs, redact } = extractRedactFlag(args);
-      if (cmdArgs[0] === '--clear') {
+
+      let clear = false;
+      let tail = 0;
+      let since: number | null = null;
+
+      for (let i = 0; i < cmdArgs.length; i++) {
+        const flag = cmdArgs[i];
+        switch (flag) {
+          case '--clear':
+            clear = true;
+            break;
+          case '--tail': {
+            const rawTail = cmdArgs[i + 1];
+            tail = parseInt(rawTail, 10);
+            if (!Number.isFinite(tail) || tail <= 0) {
+              throw new Error('Usage: websocket [--clear] [--tail N] [--since N]');
+            }
+            i++;
+            break;
+          }
+          case '--since': {
+            const rawSince = cmdArgs[i + 1];
+            since = parseInt(rawSince, 10);
+            if (!Number.isFinite(since) || since < 0) {
+              throw new Error('Usage: websocket [--clear] [--tail N] [--since N]');
+            }
+            i++;
+            break;
+          }
+          default:
+            throw new Error('Usage: websocket [--clear] [--tail N] [--since N]');
+        }
+      }
+
+      if (clear) {
         websocketBuffer.clear();
         return 'WebSocket buffer cleared.';
       }
 
-      let tail = 0;
-      const tailIdx = cmdArgs.indexOf('--tail');
-      if (tailIdx !== -1) {
-        const rawTail = cmdArgs[tailIdx + 1];
-        tail = parseInt(rawTail, 10);
-        if (!Number.isFinite(tail) || tail <= 0) {
-          throw new Error('Usage: websocket [--clear] [--tail N]');
-        }
+      if (tail > 0 && since !== null) {
+        throw new Error('websocket: --tail and --since cannot be used together');
       }
 
       const entries = websocketBuffer.toArray();
       if (entries.length === 0) return '(no websocket activity)';
-      const selected = tail > 0 ? entries.slice(-tail) : entries;
 
-      const text = selected.map((entry) => {
+      const firstSeq = websocketBuffer.totalAdded - entries.length + 1;
+      const entriesWithSeq = entries.map((entry, idx) => ({
+        entry,
+        seq: firstSeq + idx,
+      }));
+
+      let selected = entriesWithSeq;
+      if (since !== null) {
+        selected = selected.filter(({ seq }) => seq > since);
+      }
+      if (tail > 0) {
+        selected = selected.slice(-tail);
+      }
+
+      if (since !== null && selected.length === 0) {
+        return `(no websocket activity since ${since})\nNEXT_SINCE ${since}`;
+      }
+
+      const text = selected.map(({ entry, seq }) => {
         const timestamp = new Date(entry.timestamp).toISOString();
         const bytes = entry.payloadBytes ? ` (${entry.payloadBytes}B)` : '';
         const payload = entry.payload ? ` ${entry.payload}` : '';
         const error = entry.error ? ` ERROR: ${entry.error}` : '';
-        return `[${timestamp}] [${entry.direction}] ${entry.url}${bytes}${payload}${error}`;
+        const seqPrefix = since !== null ? `[#${seq}] ` : '';
+        return `${seqPrefix}[${timestamp}] [${entry.direction}] ${entry.url}${bytes}${payload}${error}`;
       }).join('\n');
+
+      if (since !== null) {
+        const nextSince = selected[selected.length - 1]!.seq;
+        return `${redactOutput(text, redact)}\nNEXT_SINCE ${nextSince}`;
+      }
+
       return redactOutput(text, redact);
     }
 
