@@ -182,10 +182,13 @@ async function startServer(): Promise<ServerState> {
     : ['bun', 'run', SERVER_SCRIPT];
   const proc = Bun.spawn(serverCmd, {
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: !IS_WINDOWS,
     env: { ...process.env, BROWSE_STATE_FILE: config.stateFile },
   });
 
-  // Don't hold the CLI open
+  // Keep the server alive when CLI runs under managed wrappers that
+  // terminate the parent process group after command completion.
+  // On Windows, avoid detached mode due different child-process semantics.
   proc.unref();
 
   // Wait for state file to appear
