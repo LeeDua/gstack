@@ -24,7 +24,9 @@ import {
 import { readAuthStateFile, writeAuthStateFile } from './auth-state';
 import { TEMP_DIR, isPathWithin } from './platform';
 
-const BROWSE_CONFIG = resolveConfig();
+function getBrowseConfig() {
+  return resolveConfig();
+}
 
 // Security: Path validation to prevent path traversal attacks
 const SAFE_DIRECTORIES = [TEMP_DIR, process.cwd()];
@@ -394,7 +396,7 @@ export async function handleMetaCommand(
       // Persist refreshed auth after user handoff so subsequent sessions can reuse SSO.
       try {
         const state = await bm.exportAuthState();
-        writeAuthStateFile(BROWSE_CONFIG.authStateFile, state);
+        writeAuthStateFile(getBrowseConfig().authStateFile, state);
       } catch {
         // Best-effort: resume should not fail if auth snapshot can't be written.
       }
@@ -407,7 +409,7 @@ export async function handleMetaCommand(
     case 'auth-save': {
       const savePath = args[0]
         ? path.resolve(args[0])
-        : BROWSE_CONFIG.authStateFile;
+        : getBrowseConfig().authStateFile;
       const state = await bm.exportAuthState();
       writeAuthStateFile(savePath, state);
       return [
@@ -421,7 +423,7 @@ export async function handleMetaCommand(
     case 'auth-load': {
       const loadPath = args[0]
         ? path.resolve(args[0])
-        : BROWSE_CONFIG.authStateFile;
+        : getBrowseConfig().authStateFile;
       if (!fs.existsSync(loadPath)) {
         throw new Error(`Auth state file not found: ${loadPath}`);
       }
@@ -438,7 +440,7 @@ export async function handleMetaCommand(
     case 'auth-status': {
       const authPath = args[0]
         ? path.resolve(args[0])
-        : BROWSE_CONFIG.authStateFile;
+        : getBrowseConfig().authStateFile;
       if (!fs.existsSync(authPath)) {
         return `Auth state: missing\npath=${authPath}`;
       }
